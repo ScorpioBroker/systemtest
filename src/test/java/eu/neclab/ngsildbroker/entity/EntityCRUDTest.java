@@ -1,12 +1,18 @@
 package eu.neclab.ngsildbroker.entity;
 
+import static org.junit.jupiter.api.Assertions.fail;
+
+import java.io.BufferedReader;
 import java.io.FileInputStream;
-import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.util.Enumeration;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-
-import com.github.jsonldjava.utils.JsonUtils;
+import java.util.Map.Entry;
+import java.util.Set;
+import java.util.stream.Collector;
+import java.util.stream.Collectors;
 
 import org.apache.commons.compress.utils.Lists;
 import org.apache.http.Header;
@@ -15,20 +21,33 @@ import org.apache.http.client.fluent.Content;
 import org.apache.http.client.fluent.Request;
 import org.apache.http.client.fluent.Response;
 import org.apache.log4j.Logger;
+import org.eclipse.jetty.server.Server;
+import org.eclipse.jetty.server.handler.AbstractHandler;
+import org.eclipse.jetty.util.Jetty;
 import org.junit.Before;
 import org.junit.jupiter.api.Test;
+import org.testcontainers.containers.DockerComposeContainer;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.images.RemoteDockerImage;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.shaded.com.google.common.collect.Maps;
 import org.testcontainers.utility.DockerImageName;
 
+import com.github.jsonldjava.utils.JsonUtils;
+import com.google.common.collect.Iterators;
+import com.google.common.collect.MapDifference;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
+import com.google.common.collect.Sets.SetView;
+
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import joptsimple.internal.Strings;
 
 @Testcontainers
 public class EntityCRUDTest {
 
+	Server server;
 	Logger logger = Logger.getLogger(getClass());
 	private static final Map<String, String> kafkaEnv = Maps.newHashMap();
 	private static final Map<String, String> postgresEnv = Maps.newHashMap();
@@ -70,6 +89,8 @@ public class EntityCRUDTest {
 		boolean success = false;
 		List<String> fails = Lists.newArrayList();
 		try {
+			setupDataProviders(test);
+			setupDataCallback(test);
 			List<Map<String, Object>> responses = (List<Map<String, Object>>) test.get("responses");
 			for (Map<String, Object> response : responses) {
 				Map<String, Object> request = (Map<String, Object>) response.get("originalRequest");
@@ -156,12 +177,17 @@ public class EntityCRUDTest {
 				}
 
 				Object receivedBody = JsonUtils.fromString(httpBody);
-				if (expectedBody.getClass().equals(receivedBody.getClass())) {
-					fails.add("Body was expected to be of type " + expectedBody.getClass() + " but was"
-							+ receivedBody.getClass());
+
+				String bodyCheck = checkBodies(receivedBody, expectedBody);
+				if (bodyCheck != null) {
+					fails.add(bodyCheck);
 					continue;
 				}
-				checkBodies(receivedBody, expectedBody);
+				success = true;
+				break;
+			}
+			if (!success) {
+				fail(JsonUtils.toPrettyString(fails));
 			}
 
 		} catch (Exception e) {
@@ -169,14 +195,280 @@ public class EntityCRUDTest {
 		}
 	}
 
-	private void checkBodies(Object receivedBody, Object expectedBody) {
-		// TODO Auto-generated method stub
+	
 
+	private void setupDataCallback(Map<String, Object> test) {
+		
+	}
+
+	private void setupDataProviders(Map<String, Object> test) {
+		Object dataProviders = test.get("dataProviders");
+		if (dataProviders == null) {
+			return;
+		}
+		Map<String, Object> providerMap = (Map<String, Object>) dataProviders;
+		int port= (int) providerMap.get("port");
+		
+		List<Map<String, Object>> providerList = (List<Map<String, Object>>) providerMap.get("defs");
+		MyHandler handler = new MyHandler(providerList);
+		if(server != null && server.isRunning()) {
+			try {
+				server.stop();
+			} catch (Exception e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+		}
+		server = new Server(port);
+		server.setHandler(handler);
+		try {
+			server.start();
+		} catch (Exception e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+
+	}
+
+	private String checkBodies(Object receivedBody, Object expectedBody) {
+		try {
+			if (expectedBody.getClass().equals(receivedBody.getClass())) {
+				return "Body was expected to be of type " + expectedBody.getClass() + " but was"
+						+ receivedBody.getClass();
+			}
+			if (expectedBody instanceof Map) {
+
+				MapDifference diff = Maps.difference((Map) receivedBody, (Map) expectedBody);
+				if (diff.areEqual()) {
+					return null;
+				}
+				Map missingInExpected = diff.entriesOnlyOnLeft();
+				Map missingInReceived = diff.entriesOnlyOnRight();
+				String result = "";
+				if (missingInExpected == null || !missingInExpected.isEmpty()) {
+					result = JsonUtils.toPrettyString(missingInExpected) + " was provided but not expected";
+				}
+				if (missingInReceived == null || !missingInReceived.isEmpty()) {
+					result = JsonUtils.toPrettyString(missingInReceived) + " was expected but not received";
+				}
+				return result;
+			} else if (expectedBody instanceof List) {
+				List receivedList = (List) receivedBody;
+				List expectedList = (List) expectedBody;
+				Set receivedSet = new HashSet(receivedList);
+				Set expectedSet = new HashSet(expectedList);
+				if (receivedList.size() != receivedSet.size()) {
+					return "Received result has top level duplicates which is not allowed in NGSI-LD";
+				}
+				if (expectedList.size() != expectedSet.size()) {
+					return "Expected result has top level duplicates which is not allowed in NGSI-LD";
+				}
+				SetView missingInReceived = Sets.difference(expectedSet, receivedSet);
+				SetView missingInExpected = Sets.difference(receivedSet, expectedSet);
+				if (missingInExpected.isEmpty() && missingInReceived.isEmpty()) {
+					return null;
+				}
+				String result = "";
+				if (!missingInExpected.isEmpty()) {
+					result = JsonUtils.toPrettyString(missingInExpected) + " was provided but not expected";
+				}
+				if (!missingInReceived.isEmpty()) {
+					result = JsonUtils.toPrettyString(missingInReceived) + " was expected but not received";
+				}
+				return result;
+			} else {
+
+			}
+
+			return null;
+		} catch (Exception e) {
+			return e.getMessage();
+		}
 	}
 
 	@Test
 	public void TestEntityCreate() {
-		//Request.Post(null)
+		// Request.Post(null)
 	}
 
+	private class MyHandler extends AbstractHandler {
+
+		private List<Map<String, Object>> providerMap;
+
+		public MyHandler(List<Map<String, Object>> providerMap) {
+			this.providerMap = providerMap;
+
+		}
+
+		@Override
+		public void handle(String target, org.eclipse.jetty.server.Request baseRequest, HttpServletRequest request,
+				HttpServletResponse response) throws IOException, ServletException {
+			for (Map<String, Object> providerDef : providerMap) {
+				Map<String, Object> endpoint = (Map<String, Object>) providerDef.get("endpoint");
+				Map<String, Object> expectedRequestHeaders = (Map<String, Object>) providerDef.get("request-headers");
+				Map<String, Object> responseHeaders = (Map<String, Object>) providerDef.get("response-headers");
+				String path = (String) endpoint.get("path");
+				Map<String, String[]> parameters = (Map<String, String[]>) endpoint.get("parameters");
+				int responseCode = (int) providerDef.get("response-code");
+				Object responseBody = providerDef.get("response-body");
+				Object expectedRequestBody = providerDef.get("request-body");
+				String requestPath = request.getPathInfo();
+				if (requestPath.equals(path) && Maps.difference(request.getParameterMap(), parameters).areEqual()) {
+					for (Entry<String, Object> expectedRequestHeader : expectedRequestHeaders.entrySet()) {
+						Enumeration<String> header = request.getHeaders(expectedRequestHeader.getKey());
+						if (header == null || !header.hasMoreElements()) {
+							logger.error(expectedRequestHeader.getKey() + " not received from request "
+									+ request.toString());
+							response.sendError(500, expectedRequestHeader.getKey() + " not received from request");
+							return;
+						}
+						Object tmp = expectedRequestHeader.getValue();
+						if (tmp instanceof List) {
+							List<String> valueList = (List<String>) tmp;
+							for (String value : valueList) {
+								if (!Iterators.contains(header.asIterator(), value)) {
+									logger.error(expectedRequestHeader.getKey() + " was expected to have value " + value
+											+ " but had "
+											+ JsonUtils.toPrettyString(Lists.newArrayList(header.asIterator())));
+									response.sendError(500, expectedRequestHeader.getKey()
+											+ " was expected to have value " + value + " but had "
+											+ JsonUtils.toPrettyString(Lists.newArrayList(header.asIterator())));
+									return;
+								}
+							}
+						} else {
+							String value = (String) tmp;
+							if (!Iterators.contains(header.asIterator(), value)) {
+								logger.error(expectedRequestHeader.getKey() + " was expected to have value " + value
+										+ " but had "
+										+ JsonUtils.toPrettyString(Lists.newArrayList(header.asIterator())));
+								response.sendError(500,
+										expectedRequestHeader.getKey() + " was expected to have value " + value
+												+ " but had "
+												+ JsonUtils.toPrettyString(Lists.newArrayList(header.asIterator())));
+								return;
+							}
+						}
+					}
+					BufferedReader reader = request.getReader();
+					String body = reader.lines().collect(Collectors.joining());
+					if (expectedRequestBody != null) {
+						Object bodyObj = JsonUtils.fromString(body);
+						if (expectedRequestBody instanceof List) {
+							if (!(bodyObj instanceof List)) {
+								logger.error("Body was expected to be a list but was " + bodyObj.getClass());
+								response.sendError(500, "Body was expected to be a list but was " + bodyObj.getClass());
+								return;
+							}
+							List receivedList = (List) bodyObj;
+							List expectedList = (List) expectedRequestBody;
+							Set receivedSet = new HashSet(receivedList);
+							Set expectedSet = new HashSet(expectedList);
+							if (receivedList.size() != receivedSet.size()) {
+								logger.error(
+										"Received result has top level duplicates which is not allowed in NGSI-LD");
+								response.sendError(500,
+										"Received result has top level duplicates which is not allowed in NGSI-LD");
+								return;
+							}
+							if (expectedList.size() != expectedSet.size()) {
+								logger.error(
+										"Expected result has top level duplicates which is not allowed in NGSI-LD");
+								response.sendError(500,
+										"Expected result has top level duplicates which is not allowed in NGSI-LD");
+								return;
+							}
+							SetView missingInReceived = Sets.difference(expectedSet, receivedSet);
+							SetView missingInExpected = Sets.difference(receivedSet, expectedSet);
+
+							String result = "";
+							if (!missingInExpected.isEmpty()) {
+								result = JsonUtils.toPrettyString(missingInExpected) + " was provided but not expected";
+							}
+							if (!missingInReceived.isEmpty()) {
+								result = JsonUtils.toPrettyString(missingInReceived) + " was expected but not received";
+							}
+							if (!result.isEmpty()) {
+								logger.error(result);
+								response.sendError(500, result);
+								return;
+							}
+
+						} else if (expectedRequestBody instanceof Map) {
+							if (!(bodyObj instanceof Map)) {
+								logger.error("Body was expected to be a map but was " + bodyObj.getClass());
+								response.sendError(500, "Body was expected to be a map but was " + bodyObj.getClass());
+								return;
+							}
+							Map mapExpectedBody = (Map) expectedRequestBody;
+							Map mapActualBody = (Map) bodyObj;
+							MapDifference diff = Maps.difference(mapActualBody, mapExpectedBody);
+							if (!diff.areEqual()) {
+								logger.error("Body was expected to be " + JsonUtils.toPrettyString(mapExpectedBody)
+										+ " but was " + JsonUtils.toPrettyString(mapActualBody));
+								response.sendError(500,
+										"Body was expected to be " + JsonUtils.toPrettyString(mapExpectedBody)
+												+ " but was " + JsonUtils.toPrettyString(mapActualBody));
+								return;
+							}
+						}
+					} else {
+						if (body != null && !body.isBlank()) {
+							logger.error("expected no body but got " + body);
+							response.sendError(500, "expected no body but got " + body);
+							return;
+						}
+					}
+					String actualResponse = "";
+					if (responseBody != null) {
+						actualResponse = JsonUtils.toPrettyString(responseBody);
+					}
+					response.sendError(responseCode, actualResponse);
+				}
+
+			}
+			logger.error("requested target not found");
+			response.sendError(500, "requested target not found");
+
+		}
+
+	}
+
+	public static void main(String[] args) {
+		Map<String, Object> tmp1 = Maps.newHashMap();
+		Map<String, Object> tmp2 = Maps.newHashMap();
+		Map<String, Object> tmp3 = Maps.newHashMap();
+		Map<String, Object> tmp4 = Maps.newHashMap();
+		tmp1.put("same", "entry");
+		tmp2.put("same", "entry");
+		tmp3.put("same2", "entry2");
+		tmp4.put("same2", "entry2");
+		MapDifference<String, Object> diff = Maps.difference(tmp1, tmp2);
+		tmp1.put("same1", tmp3);
+		tmp2.put("same1", tmp4);
+		MapDifference<String, Object> diff2 = Maps.difference(tmp1, tmp2);
+		Map<String, Object> tmp11 = Maps.newHashMap();
+		Map<String, Object> tmp21 = Maps.newHashMap();
+		Map<String, Object> tmp31 = Maps.newHashMap();
+		Map<String, Object> tmp41 = Maps.newHashMap();
+		tmp11.put("same1", "entry1");
+		tmp21.put("same1", "entry1");
+		tmp31.put("same21", "entry21");
+		tmp41.put("same21", "entry21");
+		tmp11.put("same11", tmp31);
+		tmp21.put("same11", tmp41);
+		Set test1 = new HashSet();
+		Set test2 = new HashSet();
+		test1.add(tmp1);
+		test1.add(tmp11);
+		test2.add(tmp2);
+		test2.add(tmp21);
+		SetView diff3 = Sets.difference(test1, test2);
+		Set test3 = new HashSet();
+		test3.add(tmp2);
+		SetView diff4 = Sets.difference(test1, test3);
+		SetView diff5 = Sets.difference(test3, test1);
+		System.out.println();
+
+	}
 }
