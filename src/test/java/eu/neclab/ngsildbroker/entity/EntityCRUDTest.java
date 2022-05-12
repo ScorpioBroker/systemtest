@@ -3,8 +3,11 @@ package eu.neclab.ngsildbroker.entity;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.List;
@@ -43,6 +46,7 @@ import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import joptsimple.internal.Strings;
+import junit.framework.AssertionFailedError;
 
 @Testcontainers
 public class EntityCRUDTest {
@@ -77,20 +81,29 @@ public class EntityCRUDTest {
 	@Container
 	public GenericContainer broker = new GenericContainer<>(
 			DockerImageName.parse("scorpiobroker/scorpiobroker:aaio-no-eureka_latest")).withExposedPorts(9090)
-			.withNetworkAliases("scorpio").dependsOn(kafka, postgres);;
+			.withNetworkAliases("scorpio").dependsOn(kafka, postgres);
+	private MyHandler handler;
 
 	@Before
 	public void setup() {
 		host = "http://" + broker.getHost() + ":9090/";
+		this.handler = new MyHandler(Lists.newArrayList());
+		server = new Server(8080);
+		server.setHandler(handler);
+		try {
+			server.start();
+		} catch (Exception e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
 	}
 
-	protected void runTestPart(String file) throws Exception, IOException {
+	protected void runTestPart(File file) throws Exception, IOException {
 		Map<String, Object> test = (Map<String, Object>) JsonUtils.fromInputStream(new FileInputStream(file));
 		boolean success = false;
 		List<String> fails = Lists.newArrayList();
 		try {
-			setupDataProviders(test);
-			setupDataCallback(test);
+			setupExtraServer(test);
 			List<Map<String, Object>> responses = (List<Map<String, Object>>) test.get("responses");
 			for (Map<String, Object> response : responses) {
 				Map<String, Object> request = (Map<String, Object>) response.get("originalRequest");
@@ -195,38 +208,14 @@ public class EntityCRUDTest {
 		}
 	}
 
-	
-
-	private void setupDataCallback(Map<String, Object> test) {
-		
-	}
-
-	private void setupDataProviders(Map<String, Object> test) {
-		Object dataProviders = test.get("dataProviders");
+	private void setupExtraServer(Map<String, Object> test) {
+		Object dataProviders = test.get("extraServer");
 		if (dataProviders == null) {
 			return;
 		}
 		Map<String, Object> providerMap = (Map<String, Object>) dataProviders;
-		int port= (int) providerMap.get("port");
-		
 		List<Map<String, Object>> providerList = (List<Map<String, Object>>) providerMap.get("defs");
-		MyHandler handler = new MyHandler(providerList);
-		if(server != null && server.isRunning()) {
-			try {
-				server.stop();
-			} catch (Exception e) {
-				// TODO Auto-generated catch block
-				e.printStackTrace();
-			}
-		}
-		server = new Server(port);
-		server.setHandler(handler);
-		try {
-			server.start();
-		} catch (Exception e) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
-		}
+		handler.addNewDefs(providerList);
 
 	}
 
@@ -287,16 +276,52 @@ public class EntityCRUDTest {
 	}
 
 	@Test
-	public void TestEntityCreate() {
-		// Request.Post(null)
+	public void test() throws IOException {
+		Path resources = Path.of("src", "test", "resources");
+		List<String> failed = Lists.newArrayList();
+		Files.walk(resources).forEach(t -> {
+			logger.info("Running test " + t.getName(t.getNameCount()));
+			try {
+				Files.walk(t).forEach(testpart -> {
+					try {
+						runTestPart(t.toFile());
+					} catch (AssertionFailedError | Exception e) {
+						failed.add(t.getName(t.getNameCount()).toString());
+					}
+				});
+			} catch (IOException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+		});
+		for (Entry<Map<String, Object>, Boolean> entry : this.handler.getGotCalled().entrySet()) {
+			if (!entry.getValue()) {
+				logger.error(JsonUtils.toPrettyString(entry.getKey()) + " was expected but not called");
+				failed.add(JsonUtils.toPrettyString(entry.getKey()) + " was expected but not called");
+			}
+		}
+		if (!failed.isEmpty()) {
+			fail(failed.size() + " tests failed" + JsonUtils.toPrettyString(failed));
+		}
 	}
 
 	private class MyHandler extends AbstractHandler {
 
 		private List<Map<String, Object>> providerMap;
+		private Map<Map<String, Object>, Boolean> gotCalled = Maps.newHashMap();
 
 		public MyHandler(List<Map<String, Object>> providerMap) {
 			this.providerMap = providerMap;
+			for (Map<String, Object> providerDef : providerMap) {
+				gotCalled.put(providerDef, false);
+			}
+		}
+
+		public void addNewDefs(List<Map<String, Object>> providerList) {
+			for (Map<String, Object> providerDef : providerList) {
+				gotCalled.put(providerDef, false);
+			}
+			this.providerMap.addAll(providerList);
 
 		}
 
@@ -424,6 +449,7 @@ public class EntityCRUDTest {
 						actualResponse = JsonUtils.toPrettyString(responseBody);
 					}
 					response.sendError(responseCode, actualResponse);
+					gotCalled.put(providerDef, true);
 				}
 
 			}
@@ -432,43 +458,10 @@ public class EntityCRUDTest {
 
 		}
 
-	}
-
-	public static void main(String[] args) {
-		Map<String, Object> tmp1 = Maps.newHashMap();
-		Map<String, Object> tmp2 = Maps.newHashMap();
-		Map<String, Object> tmp3 = Maps.newHashMap();
-		Map<String, Object> tmp4 = Maps.newHashMap();
-		tmp1.put("same", "entry");
-		tmp2.put("same", "entry");
-		tmp3.put("same2", "entry2");
-		tmp4.put("same2", "entry2");
-		MapDifference<String, Object> diff = Maps.difference(tmp1, tmp2);
-		tmp1.put("same1", tmp3);
-		tmp2.put("same1", tmp4);
-		MapDifference<String, Object> diff2 = Maps.difference(tmp1, tmp2);
-		Map<String, Object> tmp11 = Maps.newHashMap();
-		Map<String, Object> tmp21 = Maps.newHashMap();
-		Map<String, Object> tmp31 = Maps.newHashMap();
-		Map<String, Object> tmp41 = Maps.newHashMap();
-		tmp11.put("same1", "entry1");
-		tmp21.put("same1", "entry1");
-		tmp31.put("same21", "entry21");
-		tmp41.put("same21", "entry21");
-		tmp11.put("same11", tmp31);
-		tmp21.put("same11", tmp41);
-		Set test1 = new HashSet();
-		Set test2 = new HashSet();
-		test1.add(tmp1);
-		test1.add(tmp11);
-		test2.add(tmp2);
-		test2.add(tmp21);
-		SetView diff3 = Sets.difference(test1, test2);
-		Set test3 = new HashSet();
-		test3.add(tmp2);
-		SetView diff4 = Sets.difference(test1, test3);
-		SetView diff5 = Sets.difference(test3, test1);
-		System.out.println();
+		public Map<Map<String, Object>, Boolean> getGotCalled() {
+			return gotCalled;
+		}
 
 	}
+
 }
