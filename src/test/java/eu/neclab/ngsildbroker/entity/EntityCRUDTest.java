@@ -13,6 +13,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collector;
 import java.util.stream.Collectors;
@@ -28,9 +29,11 @@ import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.server.handler.AbstractHandler;
 import org.eclipse.jetty.util.Jetty;
 import org.junit.Before;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.DockerComposeContainer;
 import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.containers.KafkaContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
@@ -42,6 +45,7 @@ import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.google.common.collect.Sets.SetView;
 
+import eu.neclab.ngsildbroker.base.MyHandler;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -51,43 +55,39 @@ import junit.framework.AssertionFailedError;
 @Testcontainers
 public class EntityCRUDTest {
 
-	Server server;
+	static Server server;
 	Logger logger = Logger.getLogger(getClass());
-	private static final Map<String, String> kafkaEnv = Maps.newHashMap();
-	private static final Map<String, String> postgresEnv = Maps.newHashMap();
-	private String host;
 
-	{
-		kafkaEnv.put("KAFKA_ADVERTISED_HOST_NAME", "kafka");
-		kafkaEnv.put("KAFKA_ZOOKEEPER_CONNECT", "zookeeper:2181");
-		kafkaEnv.put("KAFKA_ADVERTISED_PORT", "9092");
-		kafkaEnv.put("KAFKA_LOG_RETENTION_MS", "10000");
-		kafkaEnv.put("KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS", "5000");
-		kafkaEnv.put("ALLOW_PLAINTEXT_LISTENER", "yes");
-		postgresEnv.put("POSTGRES_USER", "ngb");
-		postgresEnv.put("POSTGRES_PASSWORD", "ngb");
-		postgresEnv.put("POSTGRES_DB", "ngb");
-	}
+	private static String host;
+
+//	@Container
+//	public static GenericContainer zookeeper = new GenericContainer<>(DockerImageName.parse("zookeeper"))
+//			.withExposedPorts(2181).withNetworkAliases("zookeeper");
 	@Container
-	public GenericContainer zookeeper = new GenericContainer<>(DockerImageName.parse("zookeeper"))
-			.withExposedPorts(2181).withNetworkAliases("zookeeper");
+	public static KafkaContainer kafka = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:6.2.1")).withEnv("ALLOW_PLAINTEXT_LISTENER", "yes");
+
+//	public static GenericContainer kafka = new GenericContainer<>(DockerImageName.parse("bitnami/kafka"))
+//			.withExposedPorts(9092).withNetworkAliases("kafka").withEnv(getKafkaEnv()).dependsOn(zookeeper);
 	@Container
-	public GenericContainer kafka = new GenericContainer<>(DockerImageName.parse("bitnami/kafka"))
-			.withExposedPorts(9092).withNetworkAliases("kafka").withEnv(kafkaEnv).dependsOn(zookeeper);
-	@Container
-	public GenericContainer postgres = new GenericContainer<>(DockerImageName.parse("postgis/postgis"))
-			.withExposedPorts(5432).withNetworkAliases("postgres").withEnv(postgresEnv);
+	public static GenericContainer postgres = new GenericContainer<>(DockerImageName.parse("postgis/postgis"))
+			.withExposedPorts(5432).withNetworkAliases("postgres").withEnv(getPostgresEnv());
 
 	@Container
-	public GenericContainer broker = new GenericContainer<>(
-			DockerImageName.parse("scorpiobroker/scorpiobroker:aaio-no-eureka_latest")).withExposedPorts(9090)
+	public static GenericContainer broker = new GenericContainer<>(
+			DockerImageName.parse("scorpiobroker/scorpio:scorpio-aaio-no-eureka_latest")).withExposedPorts(9090)
 			.withNetworkAliases("scorpio").dependsOn(kafka, postgres);
-	private MyHandler handler;
 
-	@Before
-	public void setup() {
+//	@Container
+//	public static DockerComposeContainer dockerCompose = new DockerComposeContainer(
+//			Path.of("src", "test", "resources", "docker-compose.yml").toFile());
+
+	private static MyHandler handler;
+
+	@BeforeAll
+	public static void setup() {
+
 		host = "http://" + broker.getHost() + ":9090/";
-		this.handler = new MyHandler(Lists.newArrayList());
+		handler = new MyHandler(Lists.newArrayList());
 		server = new Server(8080);
 		server.setHandler(handler);
 		try {
@@ -96,6 +96,25 @@ public class EntityCRUDTest {
 			// TODO Auto-generated catch block
 			e.printStackTrace();
 		}
+	}
+
+	private static Map<String, String> getKafkaEnv() {
+		Map<String, String> kafkaEnv = Maps.newHashMap();
+		kafkaEnv.put("KAFKA_ADVERTISED_HOST_NAME", "kafka");
+		kafkaEnv.put("KAFKA_ZOOKEEPER_CONNECT", "zookeeper:2181");
+		kafkaEnv.put("KAFKA_ADVERTISED_PORT", "9092");
+		kafkaEnv.put("KAFKA_LOG_RETENTION_MS", "10000");
+		kafkaEnv.put("KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS", "5000");
+		kafkaEnv.put("ALLOW_PLAINTEXT_LISTENER", "yes");
+		return kafkaEnv;
+	}
+
+	private static Map<String, String> getPostgresEnv() {
+		Map<String, String> postgresEnv = Maps.newHashMap();
+		postgresEnv.put("POSTGRES_USER", "ngb");
+		postgresEnv.put("POSTGRES_PASSWORD", "ngb");
+		postgresEnv.put("POSTGRES_DB", "ngb");
+		return postgresEnv;
 	}
 
 	protected void runTestPart(File file) throws Exception, IOException {
@@ -294,7 +313,7 @@ public class EntityCRUDTest {
 				e.printStackTrace();
 			}
 		});
-		for (Entry<Map<String, Object>, Boolean> entry : this.handler.getGotCalled().entrySet()) {
+		for (Entry<Map<String, Object>, Boolean> entry : handler.getGotCalled().entrySet()) {
 			if (!entry.getValue()) {
 				logger.error(JsonUtils.toPrettyString(entry.getKey()) + " was expected but not called");
 				failed.add(JsonUtils.toPrettyString(entry.getKey()) + " was expected but not called");
@@ -303,165 +322,6 @@ public class EntityCRUDTest {
 		if (!failed.isEmpty()) {
 			fail(failed.size() + " tests failed" + JsonUtils.toPrettyString(failed));
 		}
-	}
-
-	private class MyHandler extends AbstractHandler {
-
-		private List<Map<String, Object>> providerMap;
-		private Map<Map<String, Object>, Boolean> gotCalled = Maps.newHashMap();
-
-		public MyHandler(List<Map<String, Object>> providerMap) {
-			this.providerMap = providerMap;
-			for (Map<String, Object> providerDef : providerMap) {
-				gotCalled.put(providerDef, false);
-			}
-		}
-
-		public void addNewDefs(List<Map<String, Object>> providerList) {
-			for (Map<String, Object> providerDef : providerList) {
-				gotCalled.put(providerDef, false);
-			}
-			this.providerMap.addAll(providerList);
-
-		}
-
-		@Override
-		public void handle(String target, org.eclipse.jetty.server.Request baseRequest, HttpServletRequest request,
-				HttpServletResponse response) throws IOException, ServletException {
-			for (Map<String, Object> providerDef : providerMap) {
-				Map<String, Object> endpoint = (Map<String, Object>) providerDef.get("endpoint");
-				Map<String, Object> expectedRequestHeaders = (Map<String, Object>) providerDef.get("request-headers");
-				Map<String, Object> responseHeaders = (Map<String, Object>) providerDef.get("response-headers");
-				String path = (String) endpoint.get("path");
-				Map<String, String[]> parameters = (Map<String, String[]>) endpoint.get("parameters");
-				int responseCode = (int) providerDef.get("response-code");
-				Object responseBody = providerDef.get("response-body");
-				Object expectedRequestBody = providerDef.get("request-body");
-				String requestPath = request.getPathInfo();
-				if (requestPath.equals(path) && Maps.difference(request.getParameterMap(), parameters).areEqual()) {
-					for (Entry<String, Object> expectedRequestHeader : expectedRequestHeaders.entrySet()) {
-						Enumeration<String> header = request.getHeaders(expectedRequestHeader.getKey());
-						if (header == null || !header.hasMoreElements()) {
-							logger.error(expectedRequestHeader.getKey() + " not received from request "
-									+ request.toString());
-							response.sendError(500, expectedRequestHeader.getKey() + " not received from request");
-							return;
-						}
-						Object tmp = expectedRequestHeader.getValue();
-						if (tmp instanceof List) {
-							List<String> valueList = (List<String>) tmp;
-							for (String value : valueList) {
-								if (!Iterators.contains(header.asIterator(), value)) {
-									logger.error(expectedRequestHeader.getKey() + " was expected to have value " + value
-											+ " but had "
-											+ JsonUtils.toPrettyString(Lists.newArrayList(header.asIterator())));
-									response.sendError(500, expectedRequestHeader.getKey()
-											+ " was expected to have value " + value + " but had "
-											+ JsonUtils.toPrettyString(Lists.newArrayList(header.asIterator())));
-									return;
-								}
-							}
-						} else {
-							String value = (String) tmp;
-							if (!Iterators.contains(header.asIterator(), value)) {
-								logger.error(expectedRequestHeader.getKey() + " was expected to have value " + value
-										+ " but had "
-										+ JsonUtils.toPrettyString(Lists.newArrayList(header.asIterator())));
-								response.sendError(500,
-										expectedRequestHeader.getKey() + " was expected to have value " + value
-												+ " but had "
-												+ JsonUtils.toPrettyString(Lists.newArrayList(header.asIterator())));
-								return;
-							}
-						}
-					}
-					BufferedReader reader = request.getReader();
-					String body = reader.lines().collect(Collectors.joining());
-					if (expectedRequestBody != null) {
-						Object bodyObj = JsonUtils.fromString(body);
-						if (expectedRequestBody instanceof List) {
-							if (!(bodyObj instanceof List)) {
-								logger.error("Body was expected to be a list but was " + bodyObj.getClass());
-								response.sendError(500, "Body was expected to be a list but was " + bodyObj.getClass());
-								return;
-							}
-							List receivedList = (List) bodyObj;
-							List expectedList = (List) expectedRequestBody;
-							Set receivedSet = new HashSet(receivedList);
-							Set expectedSet = new HashSet(expectedList);
-							if (receivedList.size() != receivedSet.size()) {
-								logger.error(
-										"Received result has top level duplicates which is not allowed in NGSI-LD");
-								response.sendError(500,
-										"Received result has top level duplicates which is not allowed in NGSI-LD");
-								return;
-							}
-							if (expectedList.size() != expectedSet.size()) {
-								logger.error(
-										"Expected result has top level duplicates which is not allowed in NGSI-LD");
-								response.sendError(500,
-										"Expected result has top level duplicates which is not allowed in NGSI-LD");
-								return;
-							}
-							SetView missingInReceived = Sets.difference(expectedSet, receivedSet);
-							SetView missingInExpected = Sets.difference(receivedSet, expectedSet);
-
-							String result = "";
-							if (!missingInExpected.isEmpty()) {
-								result = JsonUtils.toPrettyString(missingInExpected) + " was provided but not expected";
-							}
-							if (!missingInReceived.isEmpty()) {
-								result = JsonUtils.toPrettyString(missingInReceived) + " was expected but not received";
-							}
-							if (!result.isEmpty()) {
-								logger.error(result);
-								response.sendError(500, result);
-								return;
-							}
-
-						} else if (expectedRequestBody instanceof Map) {
-							if (!(bodyObj instanceof Map)) {
-								logger.error("Body was expected to be a map but was " + bodyObj.getClass());
-								response.sendError(500, "Body was expected to be a map but was " + bodyObj.getClass());
-								return;
-							}
-							Map mapExpectedBody = (Map) expectedRequestBody;
-							Map mapActualBody = (Map) bodyObj;
-							MapDifference diff = Maps.difference(mapActualBody, mapExpectedBody);
-							if (!diff.areEqual()) {
-								logger.error("Body was expected to be " + JsonUtils.toPrettyString(mapExpectedBody)
-										+ " but was " + JsonUtils.toPrettyString(mapActualBody));
-								response.sendError(500,
-										"Body was expected to be " + JsonUtils.toPrettyString(mapExpectedBody)
-												+ " but was " + JsonUtils.toPrettyString(mapActualBody));
-								return;
-							}
-						}
-					} else {
-						if (body != null && !body.isBlank()) {
-							logger.error("expected no body but got " + body);
-							response.sendError(500, "expected no body but got " + body);
-							return;
-						}
-					}
-					String actualResponse = "";
-					if (responseBody != null) {
-						actualResponse = JsonUtils.toPrettyString(responseBody);
-					}
-					response.sendError(responseCode, actualResponse);
-					gotCalled.put(providerDef, true);
-				}
-
-			}
-			logger.error("requested target not found");
-			response.sendError(500, "requested target not found");
-
-		}
-
-		public Map<Map<String, Object>, Boolean> getGotCalled() {
-			return gotCalled;
-		}
-
 	}
 
 }
